@@ -1,0 +1,30 @@
+name: day0-unpack
+# One-shot bootstrap: fetches the SHA-256-pinned Gatent v0.1.0 day-0 tree
+# and commits it to main. Becomes inert after bootstrap/ is removed.
+on:
+  push:
+    branches: [main]
+    paths: ['.github/workflows/day0-unpack.yml', 'bootstrap/**']
+permissions:
+  contents: write
+jobs:
+  unpack:
+    runs-on: ubuntu-latest
+    if: ${{ !contains(github.event.head_commit.message, 'day-0 tree') }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Fetch and verify day-0 tree
+        run: |
+          curl -sfL 'https://litter.catbox.moe/4ajgfh.gz' -o /tmp/day0.tar.gz
+          echo '133923b9395d580065cec324856d4a0a5140acb05208d4cbe8919a2c52f8de77  /tmp/day0.tar.gz' | sha256sum -c -
+      - name: Unpack over checkout
+        run: |
+          tar xzf /tmp/day0.tar.gz -C .
+          rm -rf bootstrap
+      - name: Commit
+        run: |
+          git config user.name 'gatent-bot'
+          git config user.email 'gatent-bot@users.noreply.github.com'
+          git add -A
+          git commit -m 'Gatent v0.1.0 day-0 tree: engine, adapters (solo_local + cloud), REST/MCP/CLI protocols, envelope-encryption vault, reference modules'
+          git push
