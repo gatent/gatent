@@ -1,0 +1,98 @@
+schema_version: 0
+module_version: "0.1.0"
+title: "ntfy Approval Gate (Meta-Module)"
+description: |
+  Sends an ntfy push with action buttons; pauses the calling pipeline until the
+  user responds. Approve resumes the pipeline; Deny aborts; Snooze defers for
+  the configured TTL. The primitive that gates every high-stakes Gatent action.
+tags: [meta, primitive, approval, ntfy, foundational]
+
+runner: local_python
+
+mcp:
+  description: |
+    Send an approval request to the user via ntfy push notification with
+    Approve/Deny/Snooze action buttons. Returns when the user responds or the
+    timeout elapses.
+  input_schema:
+    type: object
+    properties:
+      action_description:
+        type: string
+        description: "Plain-language description of what's being approved."
+      stake:
+        type: string
+        enum: [low, medium, high, critical]
+        default: medium
+      timeout_seconds:
+        type: integer
+        default: 300
+      callback_module_id:
+        type: string
+        description: "Module to invoke if approved. Optional."
+    required: [action_description]
+
+navigate:
+  steps:
+    - type: api_call
+      method: POST
+      url: "https://ntfy.sh/{{ approval_topic }}"
+      body: |
+        {
+          "title": "Approval needed",
+          "message": "{{ trigger_payload.action_description }}",
+          "priority": "high",
+          "actions": [
+            { "action": "http", "label": "Approve",
+              "url": "{{ approval_base_url }}/approvals/{{ trigger_payload.challenge_id }}/approve" },
+            { "action": "http", "label": "Deny",
+              "url": "{{ approval_base_url }}/approvals/{{ trigger_payload.challenge_id }}/deny" },
+            { "action": "http", "label": "Snooze 1h",
+              "url": "{{ approval_base_url }}/approvals/{{ trigger_payload.challenge_id }}/snooze?seconds=3600" }
+          ]
+        }
+  headers:
+    Content-Type: "application/json"
+
+variables:
+  approval_topic: "$GATENT_APPROVAL_TOPIC"
+  approval_base_url: "$GATENT_APPROVAL_BASE_URL"
+
+extract:
+  type: json_path
+  rows_path: "$"
+  fields:
+    challenge_id:    { path: "$.id" }
+    sent_at:         { path: "$.time" }
+    delivery_status: { path: "$.event" }
+
+transform:
+  - operation: coalesce
+    defaults:
+      delivery_status: "sent"
+
+diff:
+  identity_fields: [challenge_id]
+  emit_on: [new_record]
+
+route:
+  - match:
+      type: new_record
+    severity: info
+    sinks: [archive]
+    notifiers: []
+    template: approval_sent
+
+sinks:
+  archive:
+    type: json_lines
+    path: "~/gatent-data/approvals.jsonl"
+
+notifiers: {}
+
+notify_templates:
+  approval_sent: |
+    Approval request sent: {{ event.payload.challenge_id }}
+
+triggers:
+  - type: manual

@@ -1,0 +1,111 @@
+schema_version: 0
+module_version: "0.1.0"
+title: "Amazon KDP Title Status Watcher"
+description: |
+  Polls KDP Bookshelf for status changes on your titles. Emits field_changed
+  on status transitions; critical severity on "Blocked" or "Action Required"
+  states. Designed for self-publishing pipelines.
+tags: [publishing, kdp, amazon, content-pipeline]
+
+auth_profile_id: kdp-prod
+runner: local_python
+
+mcp:
+  description: "Check Amazon KDP for title status changes."
+  input_schema:
+    type: object
+    properties:
+      asin:
+        type: string
+        description: "Optional: filter to a specific ASIN."
+    additionalProperties: false
+
+navigate:
+  steps:
+    - type: goto
+      url: "https://kdp.amazon.com/en_US/bookshelf"
+    - type: wait_for
+      seconds: 1.0
+    - type: extract_inline
+  headers:
+    User-Agent: "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15"
+
+extract:
+  type: css
+  row_selector: "div.book-row"
+  fields:
+    asin:           { selector: "[data-asin]", attr: "data-asin" }
+    title:          { selector: ".book-title", attr: "text" }
+    status:         { selector: ".book-status-text", attr: "text" }
+    status_color:   { selector: ".book-status-text", attr: "data-color" }
+    last_updated:   { selector: ".book-updated-at", attr: "data-iso" }
+    royalties_ytd:  { selector: ".royalties-ytd", attr: "text", default: "$0.00" }
+
+transform:
+  - operation: regex_substitute
+    field: status
+    pattern: '^\s+|\s+$'
+    replacement: ""
+  - operation: regex_substitute
+    field: royalties_ytd
+    pattern: '^\$|,'
+    replacement: ""
+  - operation: cast
+    casts:
+      royalties_ytd: float
+      last_updated: datetime
+  - operation: coalesce
+    defaults:
+      status_color: "unknown"
+
+diff:
+  identity_fields: [asin]
+  content_fields: [status, status_color, royalties_ytd]
+  emit_on: [new_record, field_changed]
+  ignore_fields: [last_updated]
+
+route:
+  - match:
+      type: field_changed
+      changed_fields_include: [status]
+    severity: critical
+    sinks: [archive]
+    notifiers: [phone]
+    template: status_changed
+
+  - match:
+      type: new_record
+    severity: info
+    sinks: [archive]
+    notifiers: [phone]
+    template: new_title
+
+  - match:
+      type: field_changed
+      changed_fields_include: [royalties_ytd]
+    severity: info
+    sinks: [archive]
+
+sinks:
+  archive:
+    type: json_lines
+    path: "~/gatent-data/kdp-titles.jsonl"
+
+notifiers:
+  phone:
+    type: ntfy
+    topic: "gatent-kdp-status"
+    title: "KDP"
+
+notify_templates:
+  new_title: |
+    NEW KDP title: {{ event.payload.title }} ({{ event.payload.asin }})
+    Status: {{ event.payload.status }}
+  status_changed: |
+    KDP STATUS CHANGE: {{ event.payload.title }}
+    {{ event.previous.status }} -> {{ event.payload.status }}
+
+triggers:
+  - type: cron
+    schedule: "0 */2 * * *"
+  - type: manual

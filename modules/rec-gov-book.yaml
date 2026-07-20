@@ -1,0 +1,77 @@
+schema_version: 0
+module_version: "0.1.0"
+title: "Recreation.gov Booker"
+description: |
+  Submits a booking for a campsite. Requires step-up auth on every invocation;
+  this module CANNOT be called by an agent without explicit user approval.
+tags: [outdoors, recreation-gov, booking, high-stakes]
+
+auth_profile_id: rec-gov-account
+runner: local_python
+
+mcp_exposed: false
+
+navigate:
+  steps:
+    - type: goto
+      url: "https://www.recreation.gov/api/account/login"
+    - type: submit_form
+      url: "https://www.recreation.gov/api/account/login"
+      form_data:
+        email: "{{ auth.secrets.username }}"
+        password: "{{ auth.secrets.password }}"
+    - type: api_call
+      method: POST
+      url: "https://www.recreation.gov/api/camps/reservations/cart"
+      body:
+        site_id: "{{ trigger_payload.site_id }}"
+        start_date: "{{ trigger_payload.start_date }}"
+        end_date: "{{ trigger_payload.end_date }}"
+        guest_count: "{{ trigger_payload.guests | default(2) }}"
+    - type: api_call
+      method: POST
+      url: "https://www.recreation.gov/api/camps/reservations/cart/checkout"
+
+extract:
+  type: json_path
+  rows_path: "$"
+  fields:
+    confirmation: { path: "$.confirmation_number" }
+    site_id:      { path: "$.site_id" }
+    total:        { path: "$.total_paid" }
+    status:       { path: "$.status" }
+
+transform: []
+
+diff:
+  identity_fields: [confirmation]
+  emit_on: [new_record]
+
+route:
+  - match:
+      type: new_record
+    severity: critical
+    sinks: [archive]
+    notifiers: [phone]
+    requires_approval: true
+    step_up_proof_required: "reauth"
+    template: booking_confirmed
+
+sinks:
+  archive:
+    type: json_lines
+    path: "~/gatent-data/rec-gov-bookings.jsonl"
+
+notifiers:
+  phone:
+    type: ntfy
+    topic: "gatent-bookings"
+    title: "Booking confirmed"
+
+notify_templates:
+  booking_confirmed: |
+    BOOKING CONFIRMED: {{ event.payload.confirmation }}
+    Site {{ event.payload.site_id }} | ${{ event.payload.total }}
+
+triggers:
+  - type: manual

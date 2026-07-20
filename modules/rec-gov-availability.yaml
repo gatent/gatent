@@ -1,0 +1,93 @@
+schema_version: 0
+module_version: "0.1.0"
+title: "Recreation.gov Availability Watcher"
+description: |
+  Watches a Recreation.gov campsite or permit for available dates in a configured
+  window. Emits field_changed when availability changes. Critical severity: when
+  a scarce site opens, you want to know within seconds.
+tags: [outdoors, recreation-gov, camping]
+
+runner: local_python
+
+mcp:
+  description: "Check Recreation.gov for campsite availability in a date window."
+  input_schema:
+    type: object
+    properties:
+      facility_id:
+        type: string
+      start_date:
+        type: string
+        format: date
+      end_date:
+        type: string
+        format: date
+    required: [facility_id, start_date, end_date]
+
+navigate:
+  steps:
+    - type: api_call
+      method: GET
+      url: "https://www.recreation.gov/api/camps/availability/campground/{{ facility_id }}/month"
+  headers:
+    User-Agent: "gatent/0.1 (+https://github.com/gatent/gatent)"
+    Accept: "application/json"
+
+variables:
+  facility_id: "$REC_GOV_FACILITY_ID"
+  start_date: "$REC_GOV_START_DATE"
+  end_date: "$REC_GOV_END_DATE"
+
+extract:
+  type: json_path
+  rows_path: "$.campsites.*"
+  fields:
+    site_id:    { path: "$.campsite_id" }
+    site_name:  { path: "$.site" }
+    loop:       { path: "$.loop" }
+    site_type:  { path: "$.campsite_type" }
+    availabilities: { path: "$.availabilities" }
+
+transform:
+  - operation: regex_substitute
+    field: availabilities
+    pattern: '"([0-9]{4}-[0-9]{2}-[0-9]{2}T[^"]+)":\s*"Available"'
+    replacement: "AVAIL:$1;"
+  - operation: coalesce
+    defaults:
+      site_type: "STANDARD"
+
+diff:
+  identity_fields: [site_id]
+  content_fields: [availabilities]
+  emit_on: [field_changed]
+
+route:
+  - match:
+      type: field_changed
+      changed_fields_include: [availabilities]
+    severity: critical
+    sinks: [archive]
+    notifiers: [phone]
+    template: availability_changed
+
+sinks:
+  archive:
+    type: json_lines
+    path: "~/gatent-data/rec-gov-availability.jsonl"
+
+notifiers:
+  phone:
+    type: ntfy
+    topic: "gatent-camping-alerts"
+    title: "Campsite available"
+
+notify_templates:
+  availability_changed: |
+    {{ event.payload.site_name }} ({{ event.payload.loop }}) availability changed.
+    Open https://www.recreation.gov/camping/campgrounds/{{ event.payload.facility_id }}
+
+triggers:
+  - type: cron
+    schedule: "*/5 * * * *"
+  - type: manual

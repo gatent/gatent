@@ -1,0 +1,124 @@
+schema_version: 0
+module_version: "0.1.0"
+title: "Procore RFI Watcher"
+description: |
+  Polls a Procore project for RFIs every 15 minutes. Emits new_record on first
+  appearance, field_changed when status/assignee/due_date changes. Critical
+  severity for overdue or assigned items.
+tags: [construction, procore, rfi]
+
+auth_profile_id: procore-prod
+runner: local_python
+
+mcp:
+  description: "Check Procore for new RFIs in the configured project."
+  input_schema:
+    type: object
+    properties:
+      project_id:
+        type: string
+        description: "Procore project ID (optional; defaults to configured project)"
+    additionalProperties: false
+
+navigate:
+  steps:
+    - type: api_call
+      method: GET
+      url: "https://api.procore.com/rest/v1.0/projects/{{ project_id }}/rfis"
+  headers:
+    Procore-Company-Id: "{{ company_id }}"
+    Accept: "application/json"
+
+variables:
+  project_id: "$PROCORE_PROJECT_ID"
+  company_id: "$PROCORE_COMPANY_ID"
+
+extract:
+  type: json_path
+  rows_path: "$[*]"
+  fields:
+    id:           { path: "$.id" }
+    number:       { path: "$.number" }
+    subject:      { path: "$.subject" }
+    status:       { path: "$.status" }
+    priority:     { path: "$.priority" }
+    assignee:     { path: "$.assignee.name", default: "unassigned" }
+    due_date:     { path: "$.due_date" }
+    created_at:   { path: "$.created_at" }
+    cost_impact:  { path: "$.cost_impact", default: 0 }
+    schedule_impact: { path: "$.schedule_impact", default: 0 }
+
+transform:
+  - operation: cast
+    casts:
+      cost_impact: float
+      schedule_impact: float
+      due_date: datetime
+      created_at: datetime
+  - operation: coalesce
+    defaults:
+      priority: "normal"
+      status: "open"
+
+diff:
+  identity_fields: [id]
+  content_fields: [status, assignee, due_date, priority, cost_impact, schedule_impact]
+  emit_on: [new_record, field_changed]
+  ignore_fields: [created_at]
+
+route:
+  - match:
+      type: field_changed
+      changed_fields_include: [assignee]
+    severity: warning
+    sinks: [archive]
+    notifiers: [phone]
+    template: assignee_changed
+
+  - match:
+      type: new_record
+    severity: info
+    sinks: [archive]
+    notifiers: [phone]
+    template: new_rfi
+
+  - match:
+      type: field_changed
+      changed_fields_include: [status]
+    severity: info
+    sinks: [archive]
+    notifiers: [phone]
+    template: status_changed
+
+  - match: {}
+    severity: info
+    sinks: [archive]
+
+sinks:
+  archive:
+    type: json_lines
+    path: "~/gatent-data/procore-rfis.jsonl"
+
+notifiers:
+  phone:
+    type: ntfy
+    topic: "gatent-procore-rfis"
+    base_url: "https://ntfy.sh"
+    title: "Procore RFI"
+
+notify_templates:
+  new_rfi: |
+    NEW RFI #{{ event.payload.number }}: {{ event.payload.subject }}
+    Status: {{ event.payload.status }} | Assignee: {{ event.payload.assignee }}
+    Due: {{ event.payload.due_date }}
+  status_changed: |
+    RFI #{{ event.payload.number }} status -> {{ event.payload.status }}
+    {{ event.payload.subject }}
+  assignee_changed: |
+    RFI #{{ event.payload.number }} now assigned to {{ event.payload.assignee }}
+    {{ event.payload.subject }}
+
+triggers:
+  - type: cron
+    schedule: "*/15 * * * *"
+  - type: manual

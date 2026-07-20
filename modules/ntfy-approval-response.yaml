@@ -1,0 +1,55 @@
+schema_version: 0
+module_version: "0.1.0"
+title: "ntfy Approval Response Handler"
+description: |
+  Receives approval responses (approve/deny/snooze) from ntfy action button
+  taps, looks up the original approval challenge, and resumes/aborts the
+  calling pipeline.
+tags: [meta, primitive, approval, ntfy, foundational]
+
+runner: local_python
+mcp_exposed: false
+
+navigate:
+  steps:
+    - type: extract_inline
+
+extract:
+  type: json_path
+  rows_path: "$"
+  fields:
+    challenge_id:  { path: "$.challenge_id" }
+    response:      { path: "$.response" }
+    snooze_seconds: { path: "$.snooze_seconds", default: 0 }
+
+transform: []
+
+diff:
+  identity_fields: [challenge_id]
+  emit_on: [new_record]
+
+route:
+  - match:
+      type: new_record
+    severity: info
+    sinks: [archive]
+    notifiers: [confirmation]
+    template: response_received
+
+sinks:
+  archive:
+    type: json_lines
+    path: "~/gatent-data/approval-responses.jsonl"
+
+notifiers:
+  confirmation:
+    type: ntfy
+    topic: "$GATENT_APPROVAL_TOPIC"
+    title: "Approval recorded"
+
+notify_templates:
+  response_received: |
+    Approval {{ event.payload.challenge_id }} -> {{ event.payload.response }}
+
+triggers:
+  - type: manual
